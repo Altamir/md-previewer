@@ -1,0 +1,31 @@
+# Build
+build/
+DerivedData/
+*.dSYM
+
+# Projeto Xcode gerado pelo XcodeGen a partir de project.yml
+# (ver README: o .yml é a fonte, o .xcodeproj nao precisa ser versionado)
+MDPreviewer.xcodeproj/
+
+# Workspace do Xcode
+*.xcworkspace/
+!*.xcodeproj/project.xcworkspace/
+xcuserdata/
+*.xcuserdatad
+*.xcscmblueprint
+*.xccheckout
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editores
+*.swp
+*~
+.idea/
+.vscode/
+
+# Ferramentas locais
+.zcode/

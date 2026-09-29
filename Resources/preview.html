@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Preview</title>
+<style>{{THEME_CSS}}</style>
+</head>
+<body>
+<article id="content" class="markdown-body"></article>
+
+<script id="markdown-source" type="application/octet-stream">{{MARKDOWN_B64}}</script>
+<script>{{MARKED_JS}}</script>
+<script>{{PURIFY_JS}}</script>
+<script>{{HIGHLIGHT_JS}}</script>
+<script>
+(function () {
+  function report(payload) {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.mdPreview) {
+      window.webkit.messageHandlers.mdPreview.postMessage(payload);
+    }
+  }
+
+  try {
+    var raw = document.getElementById('markdown-source').textContent.trim();
+    // O markdown chega em base64 de bytes UTF-8; o TextDecoder reconverte sem
+    // depender de escape(), que é obsoleto.
+    var bytes = Uint8Array.from(atob(raw), function (c) { return c.charCodeAt(0); });
+    var source = new TextDecoder('utf-8').decode(bytes);
+
+    marked.setOptions({ gfm: true, breaks: false });
+    marked.use({ renderer: { image: rewriteImage } });
+
+    var content = document.getElementById('content');
+    content.innerHTML = DOMPurify.sanitize(marked.parse(source), {
+      ADD_ATTR: ['loading', 'target']
+    });
+
+    if (window.hljs) hljs.highlightAll();
+    document.body.classList.add('ready');
+
+    report({
+      status: 'ok',
+      sourceChars: source.length,
+      htmlChars: content.innerHTML.length,
+      images: content.querySelectorAll('img').length,
+      codeBlocks: content.querySelectorAll('pre code').length
+    });
+  } catch (error) {
+    report({ status: 'erro', mensagem: String(error && error.message || error) });
+  }
+
+  // Imagens relativas vivem fora do bundle da extensão, então só o handler
+  // mdasset:// consegue abri-las. http/data/absolutas seguem como estão.
+  function rewriteImage(href, title, text) {
+    var titleAttr = title ? ' title="' + escapeAttr(title) + '"' : '';
+    return '<img src="' + escapeAttr(localAssetURL(href)) + '"'
+         + ' alt="' + escapeAttr(text || '') + '"' + titleAttr + ' loading="lazy">';
+  }
+
+  function localAssetURL(href) {
+    if (!href) return '';
+    if (/^(https?:|data:|mdasset:|file:)/i.test(href)) return href;
+    if (href.charAt(0) === '/' || /^[a-zA-Z]:[\\/]/.test(href)) return href;
+    return 'mdasset://img/' + utf8ToBase64URL(href);
+  }
+
+  function utf8ToBase64URL(value) {
+    var bytes = new TextEncoder().encode(value);
+    var binary = '';
+    for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function escapeAttr(value) {
+    return String(value)
+      .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+})();
+</script>
+</body>
+</html>

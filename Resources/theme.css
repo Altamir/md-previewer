@@ -1,0 +1,179 @@
+/* Estilo no espírito do GitHub, para o preview parecer com o que se vê no
+   navegador ao abrir o .md no GitHub. */
+
+:root {
+  color-scheme: light dark;
+
+  --fg: #1f2328;
+  --fg-muted: #59636e;
+  --bg: #ffffff;
+  --bg-subtle: #f6f8fa;
+  --bg-code: #f6f8fa;
+  --border: #d1d9e0;
+  --accent: #0969da;
+  --quote-border: #d1d9e0;
+  --shadow: rgba(31, 35, 40, 0.08);
+
+  --hl-keyword: #cf222e;
+  --hl-string: #0a3069;
+  --hl-number: #0550ae;
+  --hl-comment: #6e7781;
+  --hl-title: #8250df;
+  --hl-type: #953800;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3;
+    --fg-muted: #9198a1;
+    --bg: #0d1117;
+    --bg-subtle: #151b23;
+    --bg-code: #151b23;
+    --border: #3d444d;
+    --accent: #4493f8;
+    --quote-border: #3d444d;
+    --shadow: rgba(1, 4, 9, 0.4);
+
+    --hl-keyword: #ff7b72;
+    --hl-string: #a5d6ff;
+    --hl-number: #79c0ff;
+    --hl-comment: #8b949e;
+    --hl-title: #d2a8ff;
+    --hl-type: #ffa657;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  /* Some com o flash de fundo branco antes do tema escuro. */
+  background: var(--bg);
+}
+
+.markdown-body {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 32px 40px 64px;
+  word-wrap: break-word;
+}
+
+/* Esconde a janela até o conteúdo estar pronto, evitando o flash de texto cru. */
+body:not(.ready) .markdown-body { visibility: hidden; }
+
+.markdown-body > *:first-child { margin-top: 0 !important; }
+.markdown-body > *:last-child { margin-bottom: 0 !important; }
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 24px 0 16px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+h1 { font-size: 2em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h2 { font-size: 1.5em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25em; }
+h4 { font-size: 1em; }
+h5 { font-size: .875em; }
+h6 { font-size: .85em; color: var(--fg-muted); }
+
+p, ul, ol, dl, table, pre, blockquote, details {
+  margin: 0 0 16px;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+ul, ol { padding-left: 2em; }
+li + li { margin-top: .25em; }
+li > input[type="checkbox"] { margin: 0 .35em .25em -1.4em; }
+
+blockquote {
+  padding: 0 1em;
+  color: var(--fg-muted);
+  border-left: .25em solid var(--quote-border);
+}
+
+hr {
+  height: 1px;
+  margin: 24px 0;
+  border: 0;
+  background: var(--border);
+}
+
+code, kbd, samp, pre {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .875em;
+}
+
+code {
+  padding: .2em .4em;
+  margin: 0;
+  background: var(--bg-code);
+  border-radius: 6px;
+}
+
+pre {
+  padding: 16px;
+  overflow: auto;
+  background: var(--bg-code);
+  border-radius: 6px;
+  line-height: 1.45;
+}
+
+pre code {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  font-size: 100%;
+}
+
+img {
+  max-width: 100%;
+  box-sizing: content-box;
+  background: var(--bg-subtle);
+}
+
+table {
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: auto;
+}
+
+th, td {
+  padding: 6px 13px;
+  border: 1px solid var(--border);
+}
+
+th { background: var(--bg-subtle); font-weight: 600; }
+tr:nth-child(2n) td { background: color-mix(in srgb, var(--bg-subtle) 55%, transparent); }
+
+details { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
+summary { cursor: pointer; font-weight: 600; }
+
+/* Temas do highlight.js, enxutos para casar com as variáveis acima. */
+.hljs { color: var(--fg); background: transparent; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag { color: var(--hl-keyword); }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute { color: var(--hl-string); }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link { color: var(--hl-number); }
+.hljs-comment, .hljs-quote, .hljs-deletion { color: var(--hl-comment); font-style: italic; }
+.hljs-title, .hljs-section, .hljs-name, .hljs-selector-id { color: var(--hl-title); }
+.hljs-type, .hljs-built_in, .hljs-class .hljs-title { color: var(--hl-type); }
+.hljs-attr, .hljs-variable, .hljs-template-variable { color: var(--fg); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+@media (max-width: 640px) {
+  .markdown-body { padding: 20px 16px 48px; }
+}

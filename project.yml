@@ -1,0 +1,63 @@
+name: MDPreviewer
+
+options:
+  bundleIdPrefix: com.mdpreviewer
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Assinatura ad-hoc: roda local sem conta Apple Developer.
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "YES"
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: "NO"
+    GCC_TREAT_WARNINGS_AS_ERRORS: "NO"
+
+targets:
+  # Container. Sem janela: existe apenas para o macOS registrar a extensão.
+  MDPreviewer:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mdpreviewer.app
+        PRODUCT_NAME: MDPreviewer
+        INFOPLIST_FILE: Support/App-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Support/App.entitlements
+        ENABLE_HARDENED_RUNTIME: "NO"
+        ENABLE_DEBUG_DYLIB: "NO"
+    dependencies:
+      - target: MDPreviewerExtension
+        embed: true
+
+  MDPreviewerExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Sources/Extension
+      # Listados um a um em vez de `Resources` como folder reference: o
+      # XcodeGen preservaria o nome da pasta e os recursos acabariam em
+      # Contents/Resources/Resources, um nível abaixo do que
+      # Bundle.main.resourceURL aponta.
+      - path: Resources/preview.html
+      - path: Resources/theme.css
+      - path: Resources/vendor
+        type: folder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mdpreviewer.app.preview
+        PRODUCT_NAME: MDPreviewerExtension
+        INFOPLIST_FILE: Support/Extension-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Support/Extension.entitlements
+        ENABLE_HARDENED_RUNTIME: "NO"
+        # Sem o debug dylib o executável do appex é autocontido, o que importa
+        # porque a extensão é carregada pelo Quick Look e não pelo Xcode.
+        ENABLE_DEBUG_DYLIB: "NO"
+        SKIP_INSTALL: "YES"
