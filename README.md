@@ -106,6 +106,8 @@ Finder (espaço em foo.md)
    └─ QuickLook → PreviewViewController
         ├─ MarkdownDocument        lê o arquivo (security-scoped) e remove o front matter
         ├─ NativeMarkdownRenderer  PresentationIntent → NSTextView
+        │    ├─ MarkdownImageScanner  ![...](...) no texto-fonte
+        │    └─ MarkdownImageLoader  resolve, confina e reduz à coluna
         └─ WKWebView              motor alternativo, ver "WebKit" abaixo
 ```
 
@@ -125,7 +127,8 @@ O preview tem dois motores de renderização, escolhidos em
 
 - `.native` (padrão) — parser de Markdown da própria Apple num `NSTextView`.
   Sem WebKit, sem JavaScript, sem dependências externas. Cobre GFM completo e
-  aparece instantaneamente.
+  aparece instantaneamente. As imagens relativas são desenhadas, mas dependem
+  de acesso ao disco que o Quick Look não concede — ver "Imagens relativas".
 - `.web` — `WKWebView` com [marked](https://github.com/markedjs/marked),
   [DOMPurify](https://github.com/cure53/DOMPurify) e
   [highlight.js](https://highlightjs.org). Dá o visual idêntico ao GitHub, com
@@ -174,12 +177,59 @@ Markdown em vez de deixar a janela em branco.
 
 ## Imagens relativas
 
-`![](img.png)` só funciona no modo `.web`. Um renderer do marked reescreve o
+No modo `.web`, `![](img.png)` funciona: um renderer do marked reescreve o
 caminho para `mdasset://img/<base64url>` e o `AssetSchemeHandler` devolve os
-bytes, **confinado ao diretório do próprio `.md`**: um `../` ou link simbólico
-para fora vira 404 e o `<img>` mostra o texto alternativo. No modo nativo as
-imagens aparecem como texto do link, que é o comportamento padrão do
-`NSTextView`.
+bytes, **confinado ao diretório do próprio `.md`** — um `../` ou link simbólico
+para fora vira 404 e o `<img>` mostra o texto alternativo.
+
+No modo nativo, o caminho inteiro existe — scanner, resolução, attachment e
+redimensionamento — e está descrito abaixo. O que falta é o **sandbox** não
+autorizar a leitura, e isso não é contornável de dentro da extensão.
+
+### Por que o parser da Apple não entrega imagens
+
+Medido no parser com `interpretedSyntax: .full`,
+`![alt](dir/arquivo.png)` volta como um parágrafo qualquer cujo texto é só o
+alt. **O caminho some**: não há `run.link`, não há marca de imagem, não há
+nada que o renderer pudesse estilizar. Por isso o `MarkdownImageScanner`
+localiza a sintaxe no texto-fonte antes do parser, troca cada `![...](...)` por
+um marcador opaco, e o `NativeMarkdownRenderer` troca o marcador por um
+`NSTextAttachment`. Fora de bloco de código — dentro de ``` o `![…](…)` é só
+texto e não vira imagem.
+
+### O bloqueio: o poder do Quick Look é só sobre o arquivo
+
+Isto foi medido dentro da extensão, e o log registra cada tentativa:
+
+| Tentativa | Resultado |
+| --- | --- |
+| `startAccessing…` no `.png` vizinho | `false`, leitura negada |
+| Leitura **dentro** da janela de acesso ao `.md` | `existe=true legivel=false` |
+| `bookmarkData(options: .withSecurityScope)` no vizinho | falha — criar o bookmark já exige o acesso que se quer conquistar |
+| `startAccessing…` no **diretório** do `.md` | `false` |
+| `QLSupportedImageContentTypes` no bundle | não amplia o poder |
+| `com.apple.security.app-sandbox = false` | a extensão **nem carrega** (Quick Look exige sandbox) |
+
+O `previewItemURL` autoriza o arquivo em preview e nada além dele. Desligar o
+sandbox resolveria a leitura e quebra a extensão, então o caminho é outro: um
+**arquivo auxiliar que o próprio Markdown carrega**, em base64 ou data URI.
+Enquanto o `.md` não trouxer os bytes junto, a imagem é substituída pelo texto
+alternativo.
+
+### Confinamento
+
+Independentemente do acesso, a barreira de diretório é aplicada em
+`MarkdownImageLoader.resolve`, e é a mesma do esquema `mdasset://`: o caminho
+passa por `standardizedFileURL` + `resolvingSymlinksInPath` e só é aceito se
+continuar dentro do diretório do Markdown. `../`, caminho absoluto, symlink
+para fora, `https:` e `data:` são rejeitados.
+
+```
+make imagecheck
+```
+
+Cobre 14 casos de confinamento mais a proporção do redimensionamento, e sai com
+código diferente de zero se algum falhar.
 
 ## Segurança
 
@@ -199,14 +249,17 @@ distribuição.
 
 ```
 project.yml                  definição dos dois targets (XcodeGen)
-Makefile                     build, install, uninstall, run, rendercheck, webcheck
+Makefile                     build, install, uninstall, run, rendercheck,
+                             webcheck, imagecheck
 Sources/App/                 container sem janela
 Sources/Extension/
-  PreviewViewController.swift   monta a view, escolhe o motor
-  MarkdownDocument.swift        leitura segura + remoção de front matter
-  NativeMarkdownRenderer.swift  PresentationIntent → NSTextView
-  AssetSchemeHandler.swift      esquema mdasset:// para imagens
-  Trace.swift                   log em arquivo do container
+  PreviewViewController.swift    monta a view, escolhe o motor
+  MarkdownDocument.swift         leitura segura + remoção de front matter
+  NativeMarkdownRenderer.swift   PresentationIntent → NSTextView
+  MarkdownImageScanner.swift     localiza ![...](...) no texto-fonte
+  MarkdownImageLoader.swift      resolve o caminho, confina e redimensiona
+  AssetSchemeHandler.swift       esquema mdasset:// para o motor web
+  Trace.swift                    log em arquivo do container
 Resources/
   preview.html                  template com placeholders
   theme.css                     tema claro/escuro
@@ -214,6 +267,7 @@ Resources/
 Samples/sample.md           exercita todos os recursos
 Tests/RenderCheck.swift     renderiza um .md e imprime o resultado
 Tests/WebKitCheck.swift     renderiza o HTML fora do Quick Look
+Tests/ImageAccessProbe.swift confere o confinamento e o redimensionamento
 ```
 
 ## Depuração

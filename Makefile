@@ -5,7 +5,7 @@ APP_PATH     := $(DERIVED)/Build/Products/Debug/$(APP_NAME).app
 INSTALL_PATH := /Applications/$(APP_NAME).app
 SAMPLE       ?= $(CURDIR)/Samples/sample.md
 
-.PHONY: all build install uninstall run clean rendercheck webcheck
+.PHONY: all build install uninstall run clean rendercheck webcheck imagecheck
 
 all: run
 
@@ -73,9 +73,17 @@ $(STUB):
 
 # Renderiza um .md e imprime o resultado, sem passar pelo Quick Look. É o
 # caminho mais rápido para iterar no layout.
+#
+# O scanner e o loader entram na lista porque o renderer os usa; sem eles o
+# harness compila mas não acha os tipos.
+RENDER_SRC := \
+	Sources/Extension/NativeMarkdownRenderer.swift \
+	Sources/Extension/MarkdownImageScanner.swift \
+	Sources/Extension/MarkdownImageLoader.swift
+
 rendercheck: $(STUB)
 	@mkdir -p $(BUILD_DIR)
-	swiftc -O Sources/Extension/NativeMarkdownRenderer.swift $(STUB) \
+	swiftc -O $(RENDER_SRC) $(STUB) \
 		Tests/RenderCheck.swift -o $(BUILD_DIR)/rendercheck
 	@$(BUILD_DIR)/rendercheck $(or $(SAMPLE),$(CURDIR)/Samples/sample.md)
 
@@ -86,3 +94,11 @@ webcheck:
 	@rm -f "$$TMPDIR/webkitcheck.log"
 	@$(BUILD_DIR)/webkitcheck || true
 	@cat "$$TMPDIR/webkitcheck.log"
+
+# Confere a barreira de confinamento das imagens e o redimensionamento. Sai com
+# código diferente de zero se algum caso falhar, para valer como verificação.
+imagecheck: $(STUB)
+	@mkdir -p $(BUILD_DIR)
+	swiftc -O Sources/Extension/MarkdownImageLoader.swift $(STUB) \
+		Tests/ImageAccessProbe.swift -o $(BUILD_DIR)/imagecheck
+	@$(BUILD_DIR)/imagecheck $(or $(SAMPLE_DIR),$(CURDIR)/Samples)

@@ -33,6 +33,23 @@
 			</array>
 			<key>QLSupportsSearchableItems</key>
 			<true/>
+			<!-- O poder que o Quick Look concede à extensão é sobre o arquivo em
+			     preview, e nada além dele: uma imagem ao lado do `.md` fica
+			     inacessível. Declarar os tipos de imagem no bundle é o que
+			     faz o sistema entregar também esse acesso — sem isto, imagens
+			     relativas são impossíveis no modo nativo. -->
+			<key>QLSupportedImageContentTypes</key>
+			<array>
+				<string>public.png</string>
+				<string>public.jpeg</string>
+				<string>com.compuserve.gif</string>
+				<string>org.webmproject.webp</string>
+				<string>public.svg-image</string>
+				<string>public.avif</string>
+				<string>public.heic</string>
+				<string>com.microsoft.bmp</string>
+				<string>public.tiff</string>
+			</array>
 		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.quicklook.preview</string>

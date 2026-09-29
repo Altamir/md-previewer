@@ -15,7 +15,10 @@ struct RenderCheck {
         }
         let markdown = stripFrontMatter(raw)
 
-        let output = NativeMarkdownRenderer.render(markdown)
+        // A URL do documento é o que permite resolver imagens relativas; sem
+        // ela o renderer não tem onde procurar.
+        let documentURL = URL(fileURLWithPath: path)
+        let output = NativeMarkdownRenderer.render(markdown, documentURL: documentURL)
 
         // Visão em texto puro, com os mesmos caracteres de controle, para
         // ver onde os blocos separam e como ficam alinhados.
@@ -31,8 +34,21 @@ struct RenderCheck {
         }
         print("fontes: \(fonts.sorted().joined(separator: ", "))")
 
-        let backgrounds = output.mutableCopy() as! NSMutableAttributedString
-        _ = backgrounds
+        // As imagens é o que se quer conferir: attachment presente e com o
+        // tamanho esperado, ou o texto alternativo quando o arquivo falta.
+        var attachments = 0
+        output.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: output.length)
+        ) { value, _, _ in
+            guard let attachment = value as? NSTextAttachment else { return }
+            attachments += 1
+            print(String(
+                format: "imagem %d: %@ pontos",
+                attachments,
+                NSStringFromSize(attachment.bounds.size)
+            ))
+        }
+        print("imagens embutidas: \(attachments) de \(MarkdownImageScanner.scan(markdown).count) encontradas")
     }
 
     private static func stripFrontMatter(_ text: String) -> String {

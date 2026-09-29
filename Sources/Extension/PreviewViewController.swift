@@ -35,6 +35,10 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
         view = container
     }
 
+    deinit {
+        holdsDirectoryAccess?.stopAccessingSecurityScopedResource()
+    }
+
     // MARK: - QLPreviewingController
 
     func preparePreviewOfFile(at url: URL, completionHandler: @escaping (Error?) -> Void) {
@@ -47,6 +51,18 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
         // preview baseado em dados e tomar esse caminho, em vez de exibir a
         // view. A rota baseada em view é a que serve aqui.
         Trace.log("preparePreviewOfFile \(url.lastPathComponent)")
+
+        // O poder recebido é só sobre o arquivo em preview. Imagens relativas
+        // moram **ao lado** dele, então a tentativa de abrir um `.png` vizinho é
+        // negada pelo sandbox — medido, não presumido. A extensão pede acesso ao
+        // diretório mesmo assim: se numa instalação o sistema conceder, as
+        // imagens passam a carregar sem nenhuma outra mudança.
+        let directory = url.deletingLastPathComponent()
+        let granted = directory.startAccessingSecurityScopedResource()
+        if !granted {
+            Trace.log("acesso ao diretorio negado: imagens relativas dependem disso. "
+                      + "Ver README, secao 'Imagens relativas'.")
+        }
 
         do {
             let raw = try MarkdownDocument.load(at: url)
@@ -63,7 +79,16 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
                 completionHandler(error)
             }
         }
+
+        // O acesso ao diretório é mantido enquanto o preview existir: as
+        // imagens são carregadas durante o render e redimensionadas depois, no
+        // primeiro layout.
+        if granted { holdsDirectoryAccess = directory }
     }
+
+    /// Mantém o acesso ao diretório do arquivo em preview enquanto a view
+    /// existir. Solto em `deinit`, que é o ponto em que o preview terminou.
+    private var holdsDirectoryAccess: URL?
 
     // MARK: - Render
 
@@ -85,7 +110,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
 
     private func render(markdown: String, documentURL: URL) {
         guard Engine.current == .web else {
-            return renderNative(markdown: markdown)
+            return renderNative(markdown: markdown, documentURL: documentURL)
         }
 
         guard let html = Self.makeHTML(markdown: markdown) else {
@@ -114,10 +139,11 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
         expectRenderConfirmation(source: markdown)
     }
 
-    private func renderNative(markdown: String) {
+    private func renderNative(markdown: String, documentURL: URL) {
         clearFallback()
         webView?.removeFromSuperview()
         webView = nil
+        markdownForRefit = RefitSource(markdown: markdown, url: documentURL)
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
@@ -140,7 +166,9 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
             .foregroundColor: NSColor.linkColor,
             .underlineStyle: NSUnderlineStyle.single.rawValue,
         ]
-        textView.textStorage?.setAttributedString(NativeMarkdownRenderer.render(markdown))
+        textView.textStorage?.setAttributedString(
+            NativeMarkdownRenderer.render(markdown, documentURL: documentURL)
+        )
 
         scrollView.documentView = textView
         view.addSubview(scrollView)
@@ -151,9 +179,41 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
             scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             textView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
         ])
+
+        // A largura da coluna só é conhecida depois do layout, e é ela que
+        // decide se uma imagem maior cabe ou precisa ser reduzida. Rerenderizar
+        // aqui evita fixar uma largura arbitrária e cortar a imagem.
+        DispatchQueue.main.async { [weak self] in self?.refitImages(in: textView) }
+
         renderConfirmed = true
         Trace.log("render nativo ok, \(markdown.count) chars")
     }
+
+    /// Reaplica o render com a largura real do container, agora que o layout
+    /// já aconteceu.
+    private func refitImages(in textView: NSTextView) {
+        let available = textView.textContainer?.size.width ?? 0
+        guard available > 0, markdownForRefit != nil else { return }
+
+        let previous = markdownForRefit
+        let width = available - textView.textContainerInset.width * 2
+        textView.textStorage?.setAttributedString(
+            NativeMarkdownRenderer.render(
+                previous!.markdown,
+                documentURL: previous!.url,
+                maximumImageWidth: width
+            )
+        )
+        Trace.log("imagens ajustadas para \(Int(width)) pontos de coluna")
+    }
+
+    /// Guarda o que `refitImages` precisa para repetir o render.
+    private struct RefitSource {
+        let markdown: String
+        let url: URL
+    }
+
+    private var markdownForRefit: RefitSource?
 
     private func configuration(for documentURL: URL) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()

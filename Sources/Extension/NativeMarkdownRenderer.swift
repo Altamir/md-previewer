@@ -13,12 +13,33 @@ enum NativeMarkdownRenderer {
 
     // MARK: - API
 
-    static func render(_ markdown: String) -> NSAttributedString {
+    /// - Parameters:
+    ///   - documentURL: o arquivo em preview. Só é usado para resolver imagens
+    ///     relativas; sem ele elas não têm onde procurar e saem como texto
+    ///     alternativo.
+    ///   - maximumImageWidth: largura disponível para a coluna. Uma imagem
+    ///     maior que isso é reduzida proporcionalmente, senão o attachment
+    ///     estoura a largura e o `NSTextView` corta o lado direito.
+    static func render(
+        _ markdown: String,
+        documentURL: URL? = nil,
+        maximumImageWidth: CGFloat? = nil
+    ) -> NSAttributedString {
+        // As imagens saem do texto **antes** do parser: o parser da Apple
+        // descarta o nó de imagem e devolve só o alt como parágrafo, então
+        // deixá-las no texto significaria perder o caminho. Cada imagem vira um
+        // marcador único que sobra intacto entre um bloco e o outro.
+        let stripped = ImagePlaceholderStripper(
+            markdown: markdown,
+            documentURL: documentURL,
+            maximumWidth: maximumImageWidth
+        )
+
         let parsed: AttributedString
         do {
             var options = AttributedString.MarkdownParsingOptions()
             options.interpretedSyntax = .full
-            parsed = try AttributedString(markdown: markdown, options: options)
+            parsed = try AttributedString(markdown: stripped.text, options: options)
         } catch {
             // O parser estrito lança em markup muito torto; um preview não
             // pode falhar por causa disso.
@@ -32,7 +53,112 @@ enum NativeMarkdownRenderer {
                 ]
             )
         }
-        return layout(parsed)
+        return layout(parsed, images: stripped.images)
+    }
+
+    // MARK: - Imagens
+    //
+    // O parser não devolve imagem alguma, então o bloco é reconstruído aqui a
+    // partir do que o scanner encontrou no texto-fonte. A ponte entre os dois
+    // mundos é um marcador opaco: o parser o entrega como parágrafo intacto e
+    // o layout o troca pelo `NSTextAttachment`.
+
+    private static let markerPrefix = "\u{FFFC}mdimg\u{FFFC}"
+    private static let markerDelimiter: Character = "\u{FFFC}"
+
+    /// `\u{FFFC}mdimg\u{FFFC}<índice>\u{FFFC}`.
+    ///
+    /// O prefixo é longo de propósito: um U+FFFC solto é o caractere que o
+    /// TextKit usa para o attachment, e o texto do documento pode conter
+    /// qualquer coisa. O que faz o marcador ser reconhecido é a sequência
+    /// inteira, não o caractere.
+    private static func marker(for index: Int) -> String {
+        "\(markerPrefix)\(index)\(markerDelimiter)"
+    }
+
+    /// Substitui cada `![alt](src)` por um marcador e guarda o que ele
+    /// representa.
+    private struct ImagePlaceholderStripper {
+        let text: String
+        let images: [Int: PreparedImage]
+
+        struct PreparedImage {
+            let image: NSImage?
+            let alt: String
+            let title: String?
+            let isEmphasized: Bool
+        }
+
+        init(markdown: String, documentURL: URL?, maximumWidth: CGFloat?) {
+            let found = MarkdownImageScanner.scan(markdown)
+            guard !found.isEmpty else {
+                self.text = markdown
+                self.images = [:]
+                return
+            }
+
+            var output = ""
+            var cursor = markdown.startIndex
+            var prepared: [Int: PreparedImage] = [:]
+
+            for (index, reference) in found.enumerated() {
+                // O scanner devolve o range exato do trecho `![...](...)`, então
+                // isto é uma fatiagem direta — sem busca, que acertaria a
+                // ocorrência errada num documento com imagens repetidas.
+                guard reference.range.lowerBound >= cursor else { continue }
+
+                let loaded = documentURL.flatMap {
+                    MarkdownImageLoader.load(
+                        source: reference.source,
+                        relativeTo: $0,
+                        maximumWidth: maximumWidth
+                    )
+                }
+                if loaded == nil {
+                    Trace.log("preview: imagem nao carregada (\(reference.source)) alt=\(reference.alt)")
+                }
+
+                prepared[index] = PreparedImage(
+                    image: loaded,
+                    alt: reference.alt,
+                    title: reference.title,
+                    isEmphasized: reference.isEmphasized
+                )
+
+                output += markdown[cursor..<reference.range.lowerBound]
+                output += marker(for: index)
+                cursor = reference.range.upperBound
+            }
+            output += markdown[cursor...]
+
+            self.text = output
+            self.images = prepared
+        }
+    }
+
+    /// Attachment que desenha a imagem.
+    ///
+    /// A imagem vai pela `attachmentCell` em vez da property `image`: atribuir
+    /// `image` faz o attachment tratar o conteúdo como documento, o que
+    /// exige `init(data:ofType:)` numa subclasse — e a subclasse sem esse
+    /// initializer crasha no primeiro uso. A cell resolve a imagem direto na
+    /// memória, que é o que um preview quer.
+    private static func attachment(for image: NSImage, isEmphasized: Bool) -> NSTextAttachment {
+        let cell = NSTextAttachmentCell(imageCell: image)
+        let attachment = NSTextAttachment()
+        attachment.attachmentCell = cell
+
+        var size = image.size
+        if isEmphasized {
+            size.width *= 0.85
+            size.height *= 0.85
+        }
+        // Uma altura de linha enorme desalinha o espaçamento dos parágrafos
+        // vizinhos; o limite mantém a imagem grande o bastante para ser útil
+        // sem estourar a coluna.
+        if size.height > 1200 { size.height = 1200 }
+        attachment.bounds = NSRect(origin: .zero, size: size)
+        return attachment
     }
 
     // MARK: - Tipografia
@@ -76,19 +202,47 @@ enum NativeMarkdownRenderer {
         let runs: [BlockRun]
     }
 
-    private struct BlockRun {
-        var text: String
-        let intent: PresentationIntent?
-        let inline: InlinePresentationIntent?
-        let link: URL?
+    /// Um pedaço do documento ainda com os dados do parser. A imagem é uma
+    /// variante à parte porque não vem do parser: entra por fora, do scanner.
+    private enum BlockRun {
+        case text(String, intent: PresentationIntent?, inline: InlinePresentationIntent?, link: URL?)
+        case image(Int)
+
+        var intent: PresentationIntent? {
+            if case .text(_, let intent, _, _) = self { return intent }
+            return nil
+        }
+
+        var text: String {
+            if case .text(let text, _, _, _) = self { return text }
+            return ""
+        }
     }
 
-    private static func layout(_ parsed: AttributedString) -> NSAttributedString {
+    private static func layout(
+        _ parsed: AttributedString,
+        images: [Int: ImagePlaceholderStripper.PreparedImage]
+    ) -> NSAttributedString {
         // Coleta os runs com o que precisamos deles.
         var blocks: [BlockRun] = []
         for run in parsed.runs {
-            blocks.append(BlockRun(
-                text: String(parsed[run.range].characters),
+            let text = String(parsed[run.range].characters)
+
+            // O parser devolve o marcador como texto comum, normalmente em run
+            // próprio. Quando vem colado a outro texto — o `*` do itálico nunca
+            // é descartado — o que antecede o marcador vira parágrafo solto.
+            if let index = markerIndex(in: text), images[index] != nil,
+               let range = text.range(of: markerPrefix) {
+                let leading = String(text[..<range.lowerBound])
+                if !leading.isEmpty {
+                    blocks.append(.text(leading, intent: nil, inline: nil, link: nil))
+                }
+                blocks.append(.image(index))
+                continue
+            }
+
+            blocks.append(.text(
+                text,
                 intent: run.presentationIntent,
                 inline: run.inlinePresentationIntent,
                 link: run.link
@@ -97,7 +251,7 @@ enum NativeMarkdownRenderer {
 
         // Agrupa runs consecutivos pelo "dono" do bloco. Células de tabela
         // pertencem à tabela inteira (identidade do componente `table`), o
-        // resto ao componente mais interno.
+        // resto ao componente mais interno. Cada imagem é o seu próprio grupo.
         var groups: [Group] = []
         var current: [BlockRun] = []
         var currentKey: String?
@@ -118,20 +272,62 @@ enum NativeMarkdownRenderer {
         let result = NSMutableAttributedString()
         for (index, group) in groups.enumerated() {
             if index > 0 { result.append(NSAttributedString(string: "\n")) }
-            result.append(render(group: group))
+            result.append(render(group: group, images: images))
         }
 
         if result.length == 0 {
             return NSAttributedString(string: "\n", attributes: [:])
         }
 
-        // Cor base para tudo que não recebeu cor específica.
-        result.addAttribute(.foregroundColor, value: NSColor.labelColor,
-                            range: NSRange(location: 0, length: result.length))
-        return result
+        // Cor base para tudo que não recebeu cor específica. A cor não pode
+        // tocar num attachment, senão o TextKit pinta por cima do bitmap.
+        let colorable = result.mutableCopy() as! NSMutableAttributedString
+        var position = 0
+        while position < result.length {
+            let attributed = result as NSAttributedString
+            let isAttachment = attributed.attribute(
+                .attachment, at: position, effectiveRange: nil
+            ) != nil
+            if isAttachment {
+                position += 1
+                continue
+            }
+            var end = position
+            while end < result.length,
+                  attributed.attribute(.attachment, at: end, effectiveRange: nil) == nil {
+                end += 1
+            }
+            colorable.addAttribute(
+                .foregroundColor, value: NSColor.labelColor,
+                range: NSRange(location: position, length: end - position)
+            )
+            position = end
+        }
+        return colorable
+    }
+
+    /// Lê o índice de um marcador. Os dígitos são consumidos um a um: um
+    /// documento com mais de 10 imagens é comum, e assumir largura fixa
+    /// faria o marcador da 10ª não ser reconhecido.
+    private static func markerIndex(in text: String) -> Int? {
+        guard let open = text.range(of: markerPrefix) else { return nil }
+
+        var cursor = open.upperBound
+        var digits = ""
+        while cursor < text.endIndex, text[cursor].isNumber {
+            digits.append(text[cursor])
+            cursor = text.index(after: cursor)
+        }
+
+        guard !digits.isEmpty,
+              cursor < text.endIndex,
+              text[cursor] == markerDelimiter,
+              let index = Int(digits) else { return nil }
+        return index
     }
 
     private static func ownerKey(of block: BlockRun) -> String {
+        if case .image(let index) = block { return "image:\(index)" }
         let chain = block.intent?.components ?? []
         if let table = chain.first(where: isTable) {
             return "table:\(table.identity)"
@@ -146,7 +342,14 @@ enum NativeMarkdownRenderer {
 
     // MARK: - Render por grupo
 
-    private static func render(group: Group) -> NSAttributedString {
+    private static func render(
+        group: Group,
+        images: [Int: ImagePlaceholderStripper.PreparedImage]
+    ) -> NSAttributedString {
+        if case .image(let index) = group.runs.first {
+            return image(index, from: images[index])
+        }
+
         let chain = group.runs.first?.intent?.components ?? []
         guard let innermost = chain.first else {
             // Sem intent nenhum (raro): texto puro.
@@ -195,6 +398,54 @@ enum NativeMarkdownRenderer {
 
     // MARK: Blocos comuns
 
+    /// Desenha a imagem, ou o texto que a substitui quando ela não pôde ser
+    /// carregada.
+    ///
+    /// O fallback não é decoração: o `sample.md` traz um caso de imagem
+    /// inexistente de propósito, e um preview que mostrasse um retângulo vazio
+    /// seria indistinguível de um bug.
+    private static func image(
+        _ index: Int,
+        from prepared: ImagePlaceholderStripper.PreparedImage?
+    ) -> NSAttributedString {
+        let output = NSMutableAttributedString()
+        let spacing = paragraph(spacingAfter: 12, spacingBefore: 6, lineHeight: 1.0)
+
+        guard let prepared, let picture = prepared.image else {
+            let label = prepared?.alt.isEmpty == false ? prepared!.alt : "imagem indisponível"
+            return NSAttributedString(
+                string: "🖼  \(label)",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 12.5),
+                    .foregroundColor: NSColor.tertiaryLabelColor,
+                    .paragraphStyle: spacing,
+                ]
+            )
+        }
+
+        let attachment = attachment(for: picture, isEmphasized: prepared.isEmphasized)
+        // O U+FFFC é o caractere que ocupa a posição do attachment: o
+        // comprimento da string continua 1, o que o TextKit espera.
+        let cell = NSMutableAttributedString(string: "\u{FFFC}", attributes: [
+            .attachment: attachment,
+            .paragraphStyle: spacing,
+        ])
+        output.append(cell)
+
+        if let title = prepared.title, !title.isEmpty {
+            let caption = NSAttributedString(
+                string: "\n\(title)",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 11),
+                    .foregroundColor: NSColor.tertiaryLabelColor,
+                    .paragraphStyle: paragraph(spacingAfter: 12, lineHeight: 1.0),
+                ]
+            )
+            output.append(caption)
+        }
+        return output
+    }
+
     /// Aplica estilo inline (negrito, itálico, código, risco, link) a cada run
     /// do grupo sob uma fonte-base e um paragraph style comuns.
     private static func styled(
@@ -205,12 +456,14 @@ enum NativeMarkdownRenderer {
     ) -> NSAttributedString {
         let output = NSMutableAttributedString()
         for run in group.runs {
+            guard case .text(let text, _, let inline, let url) = run else { continue }
+
             var attributes: [NSAttributedString.Key: Any] = [
-                .font: inlineFont(for: run.inline, base: base),
+                .font: inlineFont(for: inline, base: base),
                 .paragraphStyle: style ?? paragraph(),
             ]
 
-            if let inline = run.inline {
+            if let inline {
                 if has(inline, Inline.code) {
                     attributes[.font] = NSFont.monospacedSystemFont(ofSize: base.pointSize - 1, weight: .regular)
                     attributes[.foregroundColor] = NSColor.systemTeal
@@ -221,13 +474,13 @@ enum NativeMarkdownRenderer {
                 }
             }
             if let color { attributes[.foregroundColor] = color }
-            if let url = run.link {
+            if let url {
                 attributes[.link] = url
                 attributes[.foregroundColor] = NSColor.linkColor
                 attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
             }
 
-            output.append(NSAttributedString(string: run.text, attributes: attributes))
+            output.append(NSAttributedString(string: text, attributes: attributes))
         }
         return output
     }
@@ -283,9 +536,12 @@ enum NativeMarkdownRenderer {
     private static func bulletItem(_ group: Group, marker: String) -> NSAttributedString {
         // Remove o "[ ]" / "[x]" que vira checkbox, se for o caso.
         var runs = group.runs
-        if marker == "☐" || marker == "☑", var first = runs.first {
-            first.text = String(first.text.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-            runs[0] = first
+        if marker == "☐" || marker == "☑",
+           case .some(.text(let first, let intent, let inline, let link)) = runs.first {
+            runs[0] = .text(
+                String(first.dropFirst(3)).trimmingCharacters(in: .whitespaces),
+                intent: intent, inline: inline, link: link
+            )
         }
 
         let indent: CGFloat = 16
@@ -342,7 +598,8 @@ enum NativeMarkdownRenderer {
         var alignments: [PresentationIntent.TableColumn.Alignment] = []
 
         for run in group.runs {
-            let chain = run.intent?.components ?? []
+            guard case .text(let text, let intent, _, _) = run else { continue }
+            let chain = intent?.components ?? []
             guard let inner = chain.first else { continue }
 
             if alignments.isEmpty,
@@ -359,7 +616,7 @@ enum NativeMarkdownRenderer {
                 if case .tableHeaderRow = component.kind { header = true; headerRow = true }
                 if case .tableRow = component.kind { header = false }
             }
-            cells.append(Cell(text: run.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            cells.append(Cell(text: text.trimmingCharacters(in: .whitespacesAndNewlines),
                               column: column,
                               isHeader: header))
         }
