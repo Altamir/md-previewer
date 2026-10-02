@@ -5,7 +5,7 @@ APP_PATH     := $(DERIVED)/Build/Products/Debug/$(APP_NAME).app
 INSTALL_PATH := /Applications/$(APP_NAME).app
 SAMPLE       ?= $(CURDIR)/Samples/sample.md
 
-.PHONY: all build install uninstall run clean rendercheck webcheck imagecheck
+.PHONY: all build install uninstall run clean rendercheck webcheck imagecheck datacheck embed
 
 all: run
 
@@ -102,3 +102,32 @@ imagecheck: $(STUB)
 	swiftc -O Sources/Extension/MarkdownImageLoader.swift $(STUB) \
 		Tests/ImageAccessProbe.swift -o $(BUILD_DIR)/imagecheck
 	@$(BUILD_DIR)/imagecheck $(or $(SAMPLE_DIR),$(CURDIR)/Samples)
+
+# Confere a imagem embutida em data URI, que é o caminho que funciona dentro
+# do Quick Look — o sandbox não deixa abrir o .png vizinho.
+datacheck: $(STUB)
+	@mkdir -p $(BUILD_DIR)
+	swiftc -O $(RENDER_SRC) $(STUB) \
+		Tests/DataURICheck.swift -o $(BUILD_DIR)/datacheck
+	@$(BUILD_DIR)/datacheck $(or $(SAMPLE_DIR),$(CURDIR)/Samples)
+
+# Emite o `![alt](data:...)` de um arquivo, pronto para colar no Markdown.
+#
+# É a forma de escrever uma imagem que **aparece no Finder**: o Quick Look só
+# libera o arquivo em preview, então a imagem precisa viajar dentro do .md.
+# O base64 sai partido em linhas de 76 colunas, que é como fica legível.
+#
+#   make embed SRC=imagens/foto.png ALT="legenda"
+#   make embed SRC=a.png ALT=legenda          # imprime só a linha
+#   make embed SRC=a.png                      # imprime o base64 puro
+embed:
+	@test -n "$(SRC)" || { echo "uso: make embed SRC=arquivo.png [ALT=legenda]"; exit 2; }
+	@test -f "$(SRC)" || { echo "não achei $(SRC)"; exit 2; }
+	@mime=$$(file --brief --mime-type "$(SRC)"); \
+	 b64=$$(base64 < "$(SRC)" | tr -d '\n'); \
+	 if [ -n "$(ALT)" ]; then \
+	  printf '![%s](data:%s;base64,%s)\n' '$(ALT)' "$$mime" "$$b64" \
+	    | fold -s -w 76; \
+ else \
+	  printf 'data:%s;base64,%s\n' "$$mime" "$$b64" | fold -s -w 76; \
+ fi

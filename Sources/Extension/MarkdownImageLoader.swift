@@ -1,74 +1,73 @@
 import AppKit
 import Foundation
 
-/// Carrega imagens relativas ao `.md` em preview e devolve `NSImage` pronta
-/// para o `NSTextView` desenhar.
+/// Carrega imagens do Markdown para o `NSTextView` desenhar.
 ///
-/// Duas regras valem para todo caminho resolvido aqui:
+/// Duas origens, e elas têm destinos bem diferentes no preview do Quick Look:
 ///
-/// - **Confinamento.** O arquivo só pode vir do diretório do próprio Markdown,
-///   ou de um subdiretório dele. `../` e link simbólico para fora continuam
-///   barrados, como já acontece no esquema `mdasset://` do motor web — o
-///   preview não deve abrir um `~/.ssh/id_rsa` a partir de um `.md` que veio
-///   da internet.
-/// - **Sem acesso fora do escopo.** O `previewItemURL` chega security-scoped;
-///   a leitura precisa acontecer entre start/stop, como em `MarkdownDocument`.
+/// - **data URI** (`![alt](data:image/png;base64,…)`) — os bytes estão dentro
+///   do próprio `.md`, e o arquivo em preview é a única coisa que o sandbox
+///   deixa abrir. Esta é a forma que **funciona dentro da extensão**.
+/// - **caminho relativo** (`![alt](img/a.png)`) — depende de acesso ao disco
+///   que o Quick Look não concede (medido: `existe=true legivel=false` no log).
+///   Funciona fora da extensão, e numa instalação onde o sistema conceda acesso
+///   ao diretório também funciona aqui.
+///
+/// Confinamento: um caminho relativo só é aceito dentro do diretório do próprio
+/// Markdown, depois de `standardizedFileURL` + `resolvingSymlinksInPath` — o
+/// mesmo do esquema `mdasset://` do motor web. Um `../` ou link simbólico para
+/// fora é barrado. Um data URI não toca o disco, então essa regra não se
+/// aplica a ele.
 enum MarkdownImageLoader {
 
-    /// Teto absoluto para o maior lado, em pontos. Vale quando a largura da
-    /// coluna não é conhecida — sem isso, um PNG de 8000px viraria um bitmap
-    /// gigante em memória por causa de um preview.
+    /// Teto absoluto para o maior lado, em pontos, para o caso em que a coluna
+    /// ainda não tem largura conhecida. Sem isto um PNG de 8000px viraria um
+    /// bitmap gigante por causa de um preview.
     static let maximumSide: CGFloat = 1600
 
-    /// Carrega a imagem apontada em `source`, que está escrito no Markdown e
-    /// ainda não foi resolvido. Devolve `nil` quando não dá para usar.
+    /// Carrega a imagem apontada em `source`. Devolve `nil` quando não dá para
+    /// usar, e o render mostra o texto alternativo nesse caso.
     ///
     /// - Parameter maximumWidth: largura disponível para a coluna. A imagem é
-    ///   reduzida proporcionalmente quando for mais larga, mantendo a proporção
-    ///   para não distorcer.
+    ///   reduzida proporcionalmente quando for mais larga.
     static func load(
         source: String,
         relativeTo documentURL: URL,
         maximumWidth: CGFloat? = nil
     ) -> NSImage? {
-        guard let url = resolve(source: source, relativeTo: documentURL) else {
-            Trace.log("imagem fora do escopo ou caminho invalido: \(source)")
-            return nil
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let data: Data
+        if trimmed.lowercased().hasPrefix("data:") {
+            guard let decoded = decodeDataURI(trimmed) else {
+                Trace.log("data URI invalida (\(trimmed.count) chars)")
+                return nil
+            }
+            data = decoded
+        } else {
+            guard let url = resolve(source: trimmed, relativeTo: documentURL) else {
+                return nil
+            }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
+            guard let read = try? Data(contentsOf: url) else {
+                Trace.log("imagem nao lida: \(url.lastPathComponent) "
+                          + "existe=\(FileManager.default.fileExists(atPath: url.path)) "
+                          + "erro=\(readError(url)?.localizedDescription ?? "?")")
+                return nil
+            }
+            data = read
         }
 
-        // O `previewItemURL` autoriza **só** o arquivo em preview. Um `.png`
-        // vizinho fica fora do escopo: `startAccessing…` devolve `false` e a
-        // leitura é negada pelo sandbox. Medido dentro da extensão — o vizinho
-        // aparece como `existe=true legivel=false`, e criar um bookmark de
-        // security scope para ele também falha, porque criar o bookmark já
-        // exige o acesso que se quer conquistar. Desligar o sandbox resolve,
-        // mas quebra a extensão por completo (ela nem carrega), então o
-        // caminho é outro: dar um poder de leitura ao diretório inteiro.
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-
-        guard let image = NSImage(contentsOf: url) else {
-            let denied = readError(url)
-            Trace.log("imagem nao lida: \(url.lastPathComponent) "
-                      + "existe=\(FileManager.default.fileExists(atPath: url.path)) "
-                      + "erro=\(denied?.localizedDescription ?? "?")")
+        guard let image = NSImage(data: data) else {
+            Trace.log("bytes nao sao uma imagem reconhecida (\(data.count) bytes)")
             return nil
         }
         guard image.size.width > 0, image.size.height > 0 else { return nil }
 
-        var size = image.size
-        // A largura da coluna tem precedência: é ela que decide se a imagem
-        // cabe. O teto do maior lado cobre o caso em que a coluna ainda não
-        // tem largura conhecida.
-        if let maximumWidth, maximumWidth > 0, size.width > maximumWidth {
-            size.width = maximumWidth
-            size.height = (size.height * maximumWidth / image.size.width).rounded()
-        }
-        if max(size.width, size.height) > maximumSide {
-            let scale = maximumSide / max(size.width, size.height)
-            size.width = (size.width * scale).rounded()
-            size.height = (size.height * scale).rounded()
-        }
+        let size = fitted(image.size, to: maximumWidth)
         if size != image.size { image.size = size }
         return image
     }
@@ -79,10 +78,9 @@ enum MarkdownImageLoader {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        // URL absoluta, ou com esquema: não é asset local, o parser nativo não
-        // tem como buscá-la e fingir que tem só produziria um buraco.
+        // URL com esquema não é asset local, e o parser nativo não tem como
+        // buscá-la. `data:` é tratada antes, em `load`.
         if trimmed.contains("://") { return nil }
-        if trimmed.hasPrefix("data:") { return nil }
 
         let decoded = trimmed.removingPercentEncoding ?? trimmed
         if decoded.hasPrefix("/") { return nil } // fora do diretório por definição
@@ -104,13 +102,59 @@ enum MarkdownImageLoader {
         // O `standardized` resolve "..", mas o `resolvingSymlinksInPath` é o que
         // fecha o caso do link simbólico que aponta para fora: ele é aplicado
         // depois, sobre o caminho já normalizado.
-        guard isInside(root, candidate) else { return nil }
+        guard isInside(root, candidate) else {
+            Trace.log("caminho fora do diretorio do .md: \(source)")
+            return nil
+        }
         return candidate
     }
 
-    /// Lê o arquivo de novo, agora capturando o erro, para o log dizer *por
-    /// que* a imagem não entrou. É o caminho de diagnóstico; o render mesmo
-    /// usa `NSImage(contentsOf:)`.
+    // MARK: - Data URI
+
+    /// `data:image/png;base64,AAA…` → bytes da imagem.
+    ///
+    /// É o caminho que funciona dentro da extensão Quick Look: os bytes estão
+    /// no próprio arquivo em preview, que é o único que o sandbox libera.
+    private static func decodeDataURI(_ uri: String) -> Data? {
+        guard let comma = uri.firstIndex(of: ",") else { return nil }
+        let header = uri[uri.index(after: uri.startIndex)..<comma]
+        let payload = String(uri[uri.index(after: comma)...])
+
+        let isBase64 = header
+            .lowercased()
+            .split(separator: ";")
+            .contains { $0.trimmingCharacters(in: .whitespaces) == "base64" }
+
+        if isBase64 {
+            // Espaço e quebra de linha são ruído no base64 e não no dado: um
+            // Markdown com imagem embutida costuma partir o payload em linhas
+            // de 76 colunas, e o scanner entrega o trecho ainda partido.
+            let cleaned = payload.filter { !$0.isWhitespace }
+            return Data(base64Encoded: cleaned, options: [.ignoreUnknownCharacters])
+        }
+        return payload.removingPercentEncoding.map { Data($0.utf8) }
+    }
+
+    // MARK: - Tamanho
+
+    private static func fitted(_ size: NSSize, to maximumWidth: CGFloat?) -> NSSize {
+        var result = size
+        // A largura da coluna tem precedência: é ela que decide se a imagem
+        // cabe, e o TextKit corta o que transbordar.
+        if let maximumWidth, maximumWidth > 0, result.width > maximumWidth {
+            result.height = (result.height * maximumWidth / size.width).rounded()
+            result.width = maximumWidth
+        }
+        if max(result.width, result.height) > maximumSide {
+            let scale = maximumSide / max(result.width, result.height)
+            result.width = (result.width * scale).rounded()
+            result.height = (result.height * scale).rounded()
+        }
+        return result
+    }
+
+    /// Relê o arquivo para capturar o erro, só para o log dizer *por que* a
+    /// imagem não entrou. O render usa o `Data(contentsOf:)` acima.
     private static func readError(_ url: URL) -> NSError? {
         do {
             _ = try Data(contentsOf: url)

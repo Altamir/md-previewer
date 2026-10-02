@@ -284,6 +284,16 @@ enum MarkdownImageScanner {
             return (decodeEntities(source), rest.isEmpty ? nil : unquote(rest))
         }
 
+        // Data URI primeiro, antes das regras de título: o payload base64 é
+        // uma parede de caracteres e não pode passar pelo corte por espaço. E
+        // não pode ser entregue partido em linhas — o texto que o parser recebe
+        // em cima é um bloco só, e uma quebra no meio faria o resto do arquivo
+        // ser lido como parágrafo separado. As quebras são removidas aqui, e o
+        // `)` que fecha já foi consumido por quem chamou.
+        if trimmed.lowercased().hasPrefix("data:") {
+            return (trimmed.filter { !$0.isWhitespace }, nil)
+        }
+
         // Só é título se o resto inteiro couber entre aspas.
         if trimmed.hasPrefix("\"") || trimmed.hasPrefix("'") {
             let quote = trimmed.first!
@@ -303,7 +313,7 @@ enum MarkdownImageScanner {
         let source = String(trimmed[trimmed.startIndex..<space])
         let title = String(trimmed[trimmed.index(after: space)...])
             .trimmingCharacters(in: .whitespaces)
-        return (unquote(source), title.isEmpty ? nil : unquote(title))
+        return (decodeEntities(source), title.isEmpty ? nil : unquote(title))
     }
 
     private static func unquote(_ value: String) -> String {

@@ -175,16 +175,25 @@ essencial.
 Quando o motor web não confirma o render, o preview cai para o texto do
 Markdown em vez de deixar a janela em branco.
 
-## Imagens relativas
+## Imagens
 
-No modo `.web`, `![](img.png)` funciona: um renderer do marked reescreve o
-caminho para `mdasset://img/<base64url>` e o `AssetSchemeHandler` devolve os
-bytes, **confinado ao diretório do próprio `.md`** — um `../` ou link simbólico
-para fora vira 404 e o `<img>` mostra o texto alternativo.
+Há duas formas de escrever uma imagem, e elas se comportam de jeitos bem
+diferentes no Finder:
 
-No modo nativo, o caminho inteiro existe — scanner, resolução, attachment e
-redimensionamento — e está descrito abaixo. O que falta é o **sandbox** não
-autorizar a leitura, e isso não é contornável de dentro da extensão.
+| No Markdown | No preview do Finder |
+| --- | --- |
+| `![alt](data:image/png;base64,…)` | **abre** |
+| `![alt](sample-assets/preview.png)` | mostra o alt |
+
+A segunda não abre porque o poder do Quick Look é sobre o arquivo em preview e
+**só** sobre ele — e isso não é contornável de dentro da extensão. A primeira
+funciona porque os bytes estão dentro do próprio `.md`, que é justamente o
+arquivo que o sandbox libera. Ver "Por que o caminho relativo não abre" abaixo.
+
+O caminho relativo continua sendo renderizado de todas as formas: numa
+instalação onde o sistema conceda acesso ao diretório, ou fora do Quick Look,
+ele carrega normalmente. `Samples/sample-embedded.md` mostra os dois lado a
+lado.
 
 ### Por que o parser da Apple não entrega imagens
 
@@ -197,7 +206,12 @@ um marcador opaco, e o `NativeMarkdownRenderer` troca o marcador por um
 `NSTextAttachment`. Fora de bloco de código — dentro de ``` o `![…](…)` é só
 texto e não vira imagem.
 
-### O bloqueio: o poder do Quick Look é só sobre o arquivo
+O base64 partido em linhas, que é como uma imagem embutida fica legível num
+Markdown escrito à mão, é remontado pelo scanner: as quebras são removidas
+porque o texto que o parser recebe em cima é um bloco só, e uma quebra no meio
+faria o resto do arquivo ser lido como outro parágrafo.
+
+### Por que o caminho relativo não abre
 
 Isto foi medido dentro da extensão, e o log registra cada tentativa:
 
@@ -210,26 +224,28 @@ Isto foi medido dentro da extensão, e o log registra cada tentativa:
 | `QLSupportedImageContentTypes` no bundle | não amplia o poder |
 | `com.apple.security.app-sandbox = false` | a extensão **nem carrega** (Quick Look exige sandbox) |
 
-O `previewItemURL` autoriza o arquivo em preview e nada além dele. Desligar o
-sandbox resolveria a leitura e quebra a extensão, então o caminho é outro: um
-**arquivo auxiliar que o próprio Markdown carrega**, em base64 ou data URI.
-Enquanto o `.md` não trouxer os bytes junto, a imagem é substituída pelo texto
-alternativo.
+O `previewItemURL` autoriza o arquivo em preview e nada além dele. Por isso a
+solução é a imagem **viajar dentro do Markdown**, em data URI — nenhum acesso a
+disco é preciso. Para embutir uma imagem:
+
+```
+make embed SRC=imagens/foto.png ALT="legenda"
+```
 
 ### Confinamento
 
-Independentemente do acesso, a barreira de diretório é aplicada em
-`MarkdownImageLoader.resolve`, e é a mesma do esquema `mdasset://`: o caminho
-passa por `standardizedFileURL` + `resolvingSymlinksInPath` e só é aceito se
-continuar dentro do diretório do Markdown. `../`, caminho absoluto, symlink
-para fora, `https:` e `data:` são rejeitados.
+Um caminho relativo só é aceito dentro do diretório do próprio Markdown,
+depois de `standardizedFileURL` + `resolvingSymlinksInPath` — o mesmo do
+esquema `mdasset://` do motor web. `../`, caminho absoluto, symlink para fora e
+`https:` são rejeitados. Um data URI não toca o disco, então a regra não se
+aplica a ele.
 
 ```
-make imagecheck
+make imagecheck    # 14 casos de confinamento + proporção do redimensionamento
+make datacheck     # o caminho do data URI, ponta a ponta
 ```
 
-Cobre 14 casos de confinamento mais a proporção do redimensionamento, e sai com
-código diferente de zero se algum falhar.
+Ambos saem com código diferente de zero se algum caso falhar.
 
 ## Segurança
 
